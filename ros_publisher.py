@@ -2,7 +2,12 @@
 
 
 from HandTrackerRenderer import HandTrackerRenderer
+from depthai_ros_msgs.msg import HandLandmarkArray, HandLandmark
+from geometry_msgs.msg import Pose2D
+from sensor_msgs.msg import Image
+from cv_bridge import CvBridge
 import argparse
+import rospy
 
 parser = argparse.ArgumentParser()
 parser.add_argument('-e', '--edge', action="store_true",
@@ -39,15 +44,12 @@ parser_tracker.add_argument('-t', '--trace', action="store_true",
 parser_renderer = parser.add_argument_group("Renderer arguments")
 parser_renderer.add_argument('-o', '--output', 
                     help="Path to output video file")
+parser_renderer.add_argument('-fid', '--frame_id', 
+                    help="Enter the TF frame id")
 args = parser.parse_args()
 
-if args.edge:
-    print("In Edge mood")
-    from HandTrackerEdge import HandTracker
-else:
-    print("In Non Edge mood")
+from HandTrackerEdge import HandTracker
 
-    from HandTracker import HandTracker
 
 dargs = vars(args)
 tracker_args = {a:dargs[a] for a in ['pd_model', 'lm_model', 'internal_fps', 'internal_frame_height'] if dargs[a] is not None}
@@ -67,15 +69,52 @@ tracker = HandTracker(
         **tracker_args
         )
 
+frame_id = args.frame_id
 renderer = HandTrackerRenderer(
         tracker=tracker,
         output=args.output)
 
-while True:
+landmarkPub = rospy.Publisher('handCoordinates', HandLandmarkArray, queue_size=10)
+imagePub = rospy.Publisher('rgb', Image, queue_size=10)
+rospy.init_node('hand_tracker', anonymous=True)
+rate = rospy.Rate(30) # 30hz
+bridge = CvBridge()
+seq = 0
+while not rospy.is_shutdown():
     # Run hand tracker on next frame
     # 'bag' is information common to the frame and to the hands 
     # (like body keypoints in Body Pre Focusing mode)
     frame, hands, bag = tracker.next_frame()
+    image_message = bridge.cv2_to_imgmsg(frame, encoding="bgr8")
+    msg = HandLandmarkArray()
+    seq += 1
+     
+    for hand in hands:
+        local_msg = HandLandmark()
+        local_msg.label = hand.label
+        local_msg.lm_score = hand.lm_score
+        for x, y in hand.landmarks:
+            loc = Pose2D()
+            loc.x = x
+            loc.y = y
+            local_msg.landmark.append(loc)
+        if args.xyz:
+            x, y, z = hand.xyz
+            local_msg.is_spatial = True
+            local_msg.position.x = x
+            local_msg.position.y = y
+            local_msg.position.z = z
+        else:
+            local_msg.is_spatial = False
+        msg.landmarks.append(local_msg)
+    msg.header.seq = seq
+    msg.header.frame_id = frame_id
+    msg.header.stamp = rospy.Time.now()
+
+    landmarkPub.publish(msg)
+    imagePub.publish(image_message)
+    rate.sleep()
+
     if frame is None: break
     # Draw hands
     frame = renderer.draw(frame, hands, bag)

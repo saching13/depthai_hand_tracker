@@ -186,6 +186,8 @@ class HandTracker:
         print(f"Pipeline started - USB speed: {str(usb_speed).split('.')[-1]}")
 
         # Define data queues 
+        print("Statis ----- >")
+        print(self.laconic)
         if not self.laconic:
             self.q_video = self.device.getOutputQueue(name="cam_out", maxSize=1, blocking=False)
         self.q_manager_out = self.device.getOutputQueue(name="manager_out", maxSize=1, blocking=False)
@@ -524,6 +526,7 @@ class HandTracker:
             hand.norm_landmarks = np.array(res['rrn_lms']).reshape(-1,3)
             # hand.landmarks = the landmarks in the image coordinate system (in pixel)
             hand.landmarks = (np.array(res["sqn_lms"]) * self.frame_size).reshape(-1,2).astype(np.int)
+
             if self.xyz:
                 hand.xyz = res["xyz"]
                 hand.xyz_zone = res["xyz_zone"]
