@@ -23,21 +23,49 @@ class HandRegion:
                 expressed in the source rectangular image when returned to the user
         lm_score: global landmark score
         norm_landmarks : 3D landmarks coordinates in the rotated bounding rectangle, normalized [0,1]
-        landmarks : 2D landmarks coordinates in pixel in the source rectangular image
+        landmarks : 2D landmark coordinates in pixel in the source rectangular image
+        world_landmarks : 3D landmark coordinates in meter
         handedness: float between 0. and 1., > 0.5 for right hand, < 0.5 for left hand,
         label: "left" or "right", handedness translated in a string,
         xyz: real 3D world coordinates of the wrist landmark, or of the palm center (if landmarks are not used),
         xyz_zone: (left, top, right, bottom), pixel coordinates in the source rectangular image 
                 of the rectangular zone used to estimate the depth
+        gesture: (optional, set in recognize_gesture() when use_gesture==True) string corresponding to recognized gesture ("ONE","TWO","THREE","FOUR","FIVE","FIST","OK","PEACE") 
+                or None if no gesture has been recognized
         """
     def __init__(self, pd_score=None, pd_box=None, pd_kps=None):
         self.pd_score = pd_score # Palm detection score 
         self.pd_box = pd_box # Palm detection box [x, y, w, h] normalized
         self.pd_kps = pd_kps # Palm detection keypoints
 
+    def get_rotated_world_landmarks(self):
+        world_landmarks_rotated = self.world_landmarks.copy()
+        sin_rot = sin(self.rotation)
+        cos_rot = cos(self.rotation)
+        rot_m = np.array([[cos_rot, sin_rot], [-sin_rot, cos_rot]])
+        world_landmarks_rotated[:,:2] = np.dot(world_landmarks_rotated[:,:2], rot_m)
+        return world_landmarks_rotated
+
     def print(self):
         attrs = vars(self)
         print('\n'.join("%s: %s" % item for item in attrs.items()))
+
+class HandednessAverage:
+    """
+    Used to store the average handeness
+    Why ? Handedness inferred by the landmark model is not perfect. For certain poses, it is not rare that the model thinks 
+    that a right hand is a left hand (or vice versa). Instead of using the last inferred handedness, we prefer to use the average 
+    of the inferred handedness on the last frames. This gives more robustness.
+    """
+    def __init__(self):
+        self._total_handedness = 0
+        self._nb = 0
+    def update(self, new_handedness):
+        self._total_handedness += new_handedness
+        self._nb += 1
+        return self._total_handedness / self._nb
+    def reset(self):
+        self._total_handedness = self._nb = 0
 
 
 SSDAnchorOptions = namedtuple('SSDAnchorOptions',[
@@ -122,13 +150,13 @@ def generate_anchors(options):
         layer_id = last_same_stride_layer
     return np.array(anchors)
 
-def generate_handtracker_anchors():
+def generate_handtracker_anchors(input_size_width, input_size_height):
     # https://github.com/google/mediapipe/blob/master/mediapipe/modules/palm_detection/palm_detection_cpu.pbtxt
     anchor_options = SSDAnchorOptions(num_layers=4, 
                             min_scale=0.1484375,
                             max_scale=0.75,
-                            input_size_height=128,
-                            input_size_width=128,
+                            input_size_height=input_size_height,
+                            input_size_width=input_size_width,
                             anchor_offset_x=0.5,
                             anchor_offset_y=0.5,
                             strides=[8, 16, 16, 16],
@@ -138,7 +166,7 @@ def generate_handtracker_anchors():
                             fixed_anchor_size=True)
     return generate_anchors(anchor_options)
 
-def decode_bboxes(score_thresh, scores, bboxes, anchors, best_only=False):
+def decode_bboxes(score_thresh, scores, bboxes, anchors, scale=128, best_only=False):
     """
     wi, hi : NN input shape
     mediapipe/calculators/tflite/tflite_tensors_to_detections_calculator.cc
@@ -173,8 +201,34 @@ def decode_bboxes(score_thresh, scores, bboxes, anchors, best_only=False):
             }
         }
     }
+    node {
+        calculator: "TensorsToDetectionsCalculator"
+        input_stream: "TENSORS:detection_tensors"
+        input_side_packet: "ANCHORS:anchors"
+        output_stream: "DETECTIONS:unfiltered_detections"
+        options: {
+            [mediapipe.TensorsToDetectionsCalculatorOptions.ext] {
+            num_classes: 1
+            num_boxes: 2016
+            num_coords: 18
+            box_coord_offset: 0
+            keypoint_coord_offset: 4
+            num_keypoints: 7
+            num_values_per_keypoint: 2
+            sigmoid_score: true
+            score_clipping_thresh: 100.0
+            reverse_output_order: true
 
-    scores: shape = [number of anchors 896]
+            x_scale: 192.0
+            y_scale: 192.0
+            w_scale: 192.0
+            h_scale: 192.0
+            min_score_thresh: 0.5
+            }
+        }
+    }
+
+    scores: shape = [number of anchors 896 or 2016]
     bboxes: shape = [ number of anchors x 18], 18 = 4 (bounding box : (cx,cy,w,h) + 14 (7 palm keypoints)
     """
     regions = []
@@ -192,7 +246,8 @@ def decode_bboxes(score_thresh, scores, bboxes, anchors, best_only=False):
         det_bboxes2 = bboxes[detection_mask]
         det_anchors = anchors[detection_mask]
 
-    scale = 128 # x_scale, y_scale, w_scale, h_scale
+    # scale = 128 # x_scale, y_scale, w_scale, h_scale
+    # scale = 192 # x_scale, y_scale, w_scale, h_scale
 
     # cx, cy, w, h = bboxes[i,:4]
     # cx = cx * anchor.w / wi + anchor.x_center 
@@ -227,16 +282,32 @@ def decode_bboxes(score_thresh, scores, bboxes, anchors, best_only=False):
         regions.append(HandRegion(float(score), box, kps))
     return regions
 
-def non_max_suppression(regions, nms_thresh):
-
-    # cv2.dnn.NMSBoxes(boxes, scores, 0, nms_thresh) needs:
-    # boxes = [ [x, y, w, h], ...] with x, y, w, h of type int
-    # Currently, x, y, w, h are float between 0 and 1, so we arbitrarily multiply by 1000 and cast to int
-    # boxes = [r.box for r in regions]
-    boxes = [ [int(x*1000) for x in r.pd_box] for r in regions]        
-    scores = [r.pd_score for r in regions]
-    indices = cv2.dnn.NMSBoxes(boxes, scores, 0, nms_thresh)
-    return [regions[i[0]] for i in indices]
+# Starting from opencv 4.5.4, cv2.dnn.NMSBoxes output format changed
+import re
+cv2_version = cv2.__version__.split('.')
+v0 = int(cv2_version[0])
+v1 = int(cv2_version[1])
+v2 = int(re.sub(r'\D+', '', cv2_version[2]))
+if  v0 > 4 or (v0 == 4 and (v1 > 5 or (v1 == 5 and v2 >= 4))):
+    def non_max_suppression(regions, nms_thresh):
+        # cv2.dnn.NMSBoxes(boxes, scores, 0, nms_thresh) needs:
+        # boxes = [ [x, y, w, h], ...] with x, y, w, h of type int
+        # Currently, x, y, w, h are float between 0 and 1, so we arbitrarily multiply by 1000 and cast to int
+        # boxes = [r.box for r in regions]
+        boxes = [ [int(x*1000) for x in r.pd_box] for r in regions]        
+        scores = [r.pd_score for r in regions]
+        indices = cv2.dnn.NMSBoxes(boxes, scores, 0, nms_thresh) # Not using top_k=2 here because it does not give expected result. Bug ?
+        return [regions[i] for i in indices]
+else:
+    def non_max_suppression(regions, nms_thresh):
+        # cv2.dnn.NMSBoxes(boxes, scores, 0, nms_thresh) needs:
+        # boxes = [ [x, y, w, h], ...] with x, y, w, h of type int
+        # Currently, x, y, w, h are float between 0 and 1, so we arbitrarily multiply by 1000 and cast to int
+        # boxes = [r.box for r in regions]
+        boxes = [ [int(x*1000) for x in r.pd_box] for r in regions]        
+        scores = [r.pd_score for r in regions]
+        indices = cv2.dnn.NMSBoxes(boxes, scores, 0, nms_thresh) # Not using top_k=2 here because it does not give expected result. Bug ?
+        return [regions[i[0]] for i in indices]
 
 def normalize_radians(angle):
     return angle - 2 * pi * floor((angle + pi) / (2 * pi))
@@ -381,7 +452,7 @@ def warp_rect_img(rect_points, img, w, h):
 
 def distance(a, b):
     """
-    a, b: 2 points in 3D (x,y,z)
+    a, b: 2 points (in 2D or 3D)
     """
     return np.linalg.norm(a-b)
 
@@ -438,6 +509,69 @@ def find_isp_scale_params(size, resolution, is_height=True):
             min_dist = dist
     return candidate, size_candidates[candidate]
 
+def recognize_gesture(hand):           
+    # Finger states
+    # state: -1=unknown, 0=close, 1=open
+    d_3_5 = distance(hand.norm_landmarks[3], hand.norm_landmarks[5])
+    d_2_3 = distance(hand.norm_landmarks[2], hand.norm_landmarks[3])
+    angle0 = angle(hand.norm_landmarks[0], hand.norm_landmarks[1], hand.norm_landmarks[2])
+    angle1 = angle(hand.norm_landmarks[1], hand.norm_landmarks[2], hand.norm_landmarks[3])
+    angle2 = angle(hand.norm_landmarks[2], hand.norm_landmarks[3], hand.norm_landmarks[4])
+    hand.thumb_angle = angle0+angle1+angle2
+    if angle0+angle1+angle2 > 460 and d_3_5 / d_2_3 > 1.2: 
+        hand.thumb_state = 1
+    else:
+        hand.thumb_state = 0
+
+    if hand.norm_landmarks[8][1] < hand.norm_landmarks[7][1] < hand.norm_landmarks[6][1]:
+        hand.index_state = 1
+    elif hand.norm_landmarks[6][1] < hand.norm_landmarks[8][1]:
+        hand.index_state = 0
+    else:
+        hand.index_state = -1
+
+    if hand.norm_landmarks[12][1] < hand.norm_landmarks[11][1] < hand.norm_landmarks[10][1]:
+        hand.middle_state = 1
+    elif hand.norm_landmarks[10][1] < hand.norm_landmarks[12][1]:
+        hand.middle_state = 0
+    else:
+        hand.middle_state = -1
+
+    if hand.norm_landmarks[16][1] < hand.norm_landmarks[15][1] < hand.norm_landmarks[14][1]:
+        hand.ring_state = 1
+    elif hand.norm_landmarks[14][1] < hand.norm_landmarks[16][1]:
+        hand.ring_state = 0
+    else:
+        hand.ring_state = -1
+
+    if hand.norm_landmarks[20][1] < hand.norm_landmarks[19][1] < hand.norm_landmarks[18][1]:
+        hand.little_state = 1
+    elif hand.norm_landmarks[18][1] < hand.norm_landmarks[20][1]:
+        hand.little_state = 0
+    else:
+        hand.little_state = -1
+
+    # Gesture
+    if hand.thumb_state == 1 and hand.index_state == 1 and hand.middle_state == 1 and hand.ring_state == 1 and hand.little_state == 1:
+        hand.gesture = "FIVE"
+    elif hand.thumb_state == 0 and hand.index_state == 0 and hand.middle_state == 0 and hand.ring_state == 0 and hand.little_state == 0:
+        hand.gesture = "FIST"
+    elif hand.thumb_state == 1 and hand.index_state == 0 and hand.middle_state == 0 and hand.ring_state == 0 and hand.little_state == 0:
+        hand.gesture = "OK" 
+    elif hand.thumb_state == 0 and hand.index_state == 1 and hand.middle_state == 1 and hand.ring_state == 0 and hand.little_state == 0:
+        hand.gesture = "PEACE"
+    elif hand.thumb_state == 0 and hand.index_state == 1 and hand.middle_state == 0 and hand.ring_state == 0 and hand.little_state == 0:
+        hand.gesture = "ONE"
+    elif hand.thumb_state == 1 and hand.index_state == 1 and hand.middle_state == 0 and hand.ring_state == 0 and hand.little_state == 0:
+        hand.gesture = "TWO"
+    elif hand.thumb_state == 1 and hand.index_state == 1 and hand.middle_state == 1 and hand.ring_state == 0 and hand.little_state == 0:
+        hand.gesture = "THREE"
+    elif hand.thumb_state == 0 and hand.index_state == 1 and hand.middle_state == 1 and hand.ring_state == 1 and hand.little_state == 1:
+        hand.gesture = "FOUR"
+    else:
+        hand.gesture = None
+
+
 # Movenet
 
 class Body:
@@ -464,6 +598,15 @@ class Body:
     def print(self):
         attrs = vars(self)
         print('\n'.join("%s: %s" % item for item in attrs.items()))
+
+    def distance_to_wrist(self, hand, wrist_handedness, pad_w=0, pad_h=0):
+        """
+        Calculate the distance between a hand (class Hand) wrist position 
+        and one of the body wrist given by wrist_handedness (= "left" or "right")
+        As the hand.landmarks cooordinates are expressed in the padded image, we must substract the padding (given by pad_w and pad_w)
+        to be coherent with the body keypoint coordinates which are expressed in the source image.
+        """
+        return distance(hand.landmarks[0]-np.array([pad_w, pad_h]), self.keypoints[BODY_KP[wrist_handedness+'_wrist']])
 
 CropRegion = namedtuple('CropRegion',['xmin', 'ymin', 'xmax',  'ymax', 'size']) # All values are in pixel. The region is a square of size 'size' pixels
 
