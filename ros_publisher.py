@@ -93,6 +93,11 @@ while not rospy.is_shutdown():
         local_msg = HandLandmark()
         local_msg.label = hand.label
         local_msg.lm_score = hand.lm_score
+        if hand.gesture != None:
+            local_msg.gesture = hand.gesture
+        else:
+            local_msg.gesture = ''
+
         for x, y in hand.landmarks:
             loc = Pose2D()
             loc.x = x
@@ -101,13 +106,16 @@ while not rospy.is_shutdown():
         if args.xyz:
             x, y, z = hand.xyz
             local_msg.is_spatial = True
-            local_msg.position.x = x
-            local_msg.position.y = y
-            local_msg.position.z = z
+            local_msg.position.x = x / 1000
+            local_msg.position.y = y / 1000
+            local_msg.position.z = z / 1000
         else:
             local_msg.is_spatial = False
         msg.landmarks.append(local_msg)
-    msg.header.seq = seq
+        if hand.gesture == 'FIST':
+                fistFound = True
+
+    # msg.header.seq = seq
     msg.header.frame_id = frame_id
     msg.header.stamp = rospy.Time.now()
 
@@ -115,11 +123,11 @@ while not rospy.is_shutdown():
     imagePub.publish(image_message)
     rate.sleep()
 
-    if frame is None: break
-    # Draw hands
-    frame = renderer.draw(frame, hands, bag)
-    key = renderer.waitKey(delay=1)
-    if key == 27 or key == ord('q'):
-        break
-renderer.exit()
+    # if frame is None: break
+    # # Draw hands
+    # frame = renderer.draw(frame, hands, bag)
+    # key = renderer.waitKey(delay=1)
+    # if key == 27 or key == ord('q'):
+    #     break
+# renderer.exit()
 tracker.exit()

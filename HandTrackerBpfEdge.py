@@ -179,7 +179,7 @@ class HandTrackerBpf:
                 print(f"Error: {resolution} is not a valid resolution !")
                 sys.exit()
             print("Sensor resolution:", self.resolution)
-
+            
             if xyz:
                 # Check if the device supports stereo
                 cameras = self.device.getConnectedCameras()
@@ -240,7 +240,7 @@ class HandTrackerBpf:
         usb_speed = self.device.getUsbSpeed()
         self.device.startPipeline(self.create_pipeline())
         print(f"Pipeline started - USB speed: {str(usb_speed).split('.')[-1]}")
-
+        print(f'self.laconic  status {self.laconic}' )
         # Define data queues 
         if not self.laconic:
             self.q_video = self.device.getOutputQueue(name="cam_out", maxSize=1, blocking=False)
