@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 
-from HandTrackerRenderer import HandTrackerRenderer
+# from HandTrackerRenderer import HandTrackerRenderer
 from depthai_ros_msgs.msg import HandLandmarkArray, HandLandmark
 from geometry_msgs.msg import Pose2D
 from sensor_msgs.msg import Image
@@ -10,8 +10,7 @@ import argparse
 import rospy
 
 parser = argparse.ArgumentParser()
-# parser.add_argument('-e', '--edge', action="store_true",
-#                     help="Use Edge mode (postprocessing runs on the device)")
+
 parser_tracker = parser.add_argument_group("Tracker arguments")
 parser_tracker.add_argument('-i', '--input', type=str, 
                     help="Path to video or image file to use as input (if not specified, use OAK color camera)")
@@ -34,9 +33,11 @@ parser_tracker.add_argument('-f', '--internal_fps', type=int,
 parser_tracker.add_argument("-r", "--resolution", choices=['full', 'ultra'], default='full',
                     help="Sensor resolution: 'full' (1920x1080) or 'ultra' (3840x2160) (default=%(default)s)")
 parser_tracker.add_argument('--internal_frame_height', type=int,                                                                                 
-                    help="Internal color camera frame height in pixels")   
-parser_tracker.add_argument("-lh", "--use_last_handedness", action="store_true",
-                    help="Use last inferred handedness. Otherwise use handedness average (more robust)")                            
+                    help="Internal color camera frame height in pixels") 
+parser_tracker.add_argument("-bpf", "--body_pre_focusing", default='higher', choices=['right', 'left', 'group', 'higher'],
+                    help="Enable Body Pre Focusing")      
+parser_tracker.add_argument('-ah', '--all_hands', action="store_true", 
+                    help="In Body Pre Focusing mode, consider all hands (not only the hands up)")                                     
 parser_tracker.add_argument('--single_hand_tolerance_thresh', type=int, default=10,
                     help="(Duo mode only) Number of frames after only one hand is detected before calling palm detection (default=%(default)s)")
 parser_tracker.add_argument('--dont_force_same_image', action="store_true",
@@ -45,20 +46,18 @@ parser_tracker.add_argument('-lmt', '--lm_nb_threads', type=int, choices=[1,2], 
                     help="Number of the landmark model inference threads (default=%(default)i)")  
 parser_tracker.add_argument('-t', '--trace', type=int, nargs="?", const=1, default=0, 
                     help="Print some debug infos. The type of info depends on the optional argument.")                
-parser_renderer = parser.add_argument_group("Renderer arguments")
+parser_renderer = parser.add_argument_group("Renderer arguments") 
 parser_renderer.add_argument('-o', '--output', 
                     help="Path to output video file")
 parser_renderer.add_argument('-fid', '--frame_id', 
                     help="Enter the TF frame id")
 args = parser.parse_args()
-
-from HandTrackerEdge import HandTracker
-
-
 dargs = vars(args)
 tracker_args = {a:dargs[a] for a in ['pd_model', 'lm_model', 'internal_fps', 'internal_frame_height'] if dargs[a] is not None}
 
-tracker = HandTracker(
+from HandTrackerBpfEdge import HandTrackerBpf
+
+tracker = HandTrackerBpf(
         input_src=args.input, 
         use_lm= not args.no_lm, 
         use_world_landmarks=args.use_world_landmarks,
@@ -67,19 +66,20 @@ tracker = HandTracker(
         solo=args.solo,
         crop=args.crop,
         resolution=args.resolution,
-        stats=True,
-        trace=args.trace,
-        use_handedness_average=not args.use_last_handedness,
+        body_pre_focusing=args.body_pre_focusing,
+        hands_up_only=not args.all_hands,
         single_hand_tolerance_thresh=args.single_hand_tolerance_thresh,
         lm_nb_threads=args.lm_nb_threads,
+        stats=True,
+        trace=args.trace,
         **tracker_args
         )
 
 
 frame_id = args.frame_id
-renderer = HandTrackerRenderer(
-        tracker=tracker,
-        output=args.output)
+# renderer = HandTrackerRenderer(
+#         tracker=tracker,
+#         output=args.output)
 
 landmarkPub = rospy.Publisher('handCoordinates', HandLandmarkArray, queue_size=10)
 imagePub = rospy.Publisher('rgb', Image, queue_size=10)
@@ -122,8 +122,8 @@ while not rospy.is_shutdown():
         if hand.gesture == 'FIST':
             fistFound = True
     # print(hands)
-    print(msg)
-    print(frame.shape)
+    # print(msg)
+    # print(frame.shape)
     # msg.header.seq = seq
     msg.header.frame_id = frame_id
     msg.header.stamp = rospy.Time.now()
