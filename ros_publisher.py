@@ -113,7 +113,7 @@ while not rospy.is_shutdown():
             local_msg.is_spatial = False
         msg.landmarks.append(local_msg)
         if hand.gesture == 'FIST':
-                fistFound = True
+            fistFound = True
 
     # msg.header.seq = seq
     msg.header.frame_id = frame_id
